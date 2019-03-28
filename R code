@@ -1,0 +1,362 @@
+##################################################################################################################################################
+# DMC scaling approach applied to distribution of EVA vegetation plots (=PLOTS) inside species' ranges (=RANGE) in geographic space 
+# example species: Achillea atrata 
+##################################################################################################################################################
+
+library(foreign)
+library(spatstat)
+library(sp)
+library(ape)
+
+##################################################################################################################################################
+#input data
+setwd()
+
+#EVA-Plots raster (in 2.5-min raster resolution)
+eva<-as.data.frame(read.dbf("PLOTS.dbf")) 
+
+#all EVA-Plots raster in EVA space (=1)
+eva<-eva[eva$SPEC_ID==1,]
+
+#species range raster (in 2.5-min raster resolution)
+range<-as.data.frame(read.dbf("RANGE.dbf")) 
+
+#all species range raster in EVA space (=1)
+range<-range[range$SPEC_ID==1,]
+
+# set color code
+color<-vector()
+color[1]<-rgb(225,225,225, maxColorValue=255) #grey -> species range
+color[2]<-rgb(10,127,255, maxColorValue=255) #blue -> EVA plots in geographic space
+color[3]<-rgb(214,10,31, maxColorValue=255) #red -> EVA plots in climatic space
+color[4]<-rgb(255,255,255, alpha=255, maxColorValue=255) #white 
+
+##################################################################################################################################################
+
+read.key<-function()
+{
+  
+  cat ("Press [enter] to continue.")
+  line<-readline()
+  
+}
+
+##################################################################################################################################################
+# the following DMC function calculates
+#     (1) dmc = the final DMC value 
+#     (2) dmc.w = the final DMC value, where matches on finer resolution are higher weighted than matches on coarser resolution 
+
+# for visualization of the single steps see below:  DMC.Demo 
+
+DMC<-function(plots, range, n=20) # n= number of scaling steps is variable, here number is set to 20 steps
+{
+  
+  if(n<=2){n=3}
+  
+  #coordinates of range
+  coords.range<-data.frame(cbind(X=range$X, Y=range$Y))
+  
+  #coordinates of plots/occurences
+  coords.plots<-data.frame(cbind(X=plots$X, Y=plots$Y))
+  
+  #mask from range
+  #rectangular window with quadrats, occupied by plots/occurences
+  win.range<-owin(c(min(coords.range$X), max(coords.range$X)), c(min(coords.range$Y), max(coords.range$Y)))
+  
+  #delete plots/occurences coordinates which are not inside this window
+  is_in<-inside.owin(x=coords.plots$X, y=coords.plots$Y, w=win.range)
+  coords.plots.point_in<-coords.plots[is_in,]
+  coords.plots.point_out<-coords.plots[!is_in,]
+  
+  #create spatial point pattern-object from range
+  #rectangular
+  pattern.range<-ppp(x=coords.range$X, y=coords.range$Y, window=win.range)
+  
+  #create spatial point pattern-object from plots/occurences
+  #rectangular
+  pattern.plots<-ppp(x=coords.plots.point_in$X, y=coords.plots.point_in$Y, window=win.range)
+  
+  #quadrats (stepwise)
+  max_x<-diff(pattern.range$window$xrange)
+  max_y<-diff(pattern.range$window$yrange)
+  
+  #max. extent
+  max_xy<-ifelse(max_x>=max_y, max_x, max_y)
+  
+  output.k<-data.frame(matrix(0, (n-1), 3))
+  colnames(output.k)<-c("STEP", "N_CELLS", "DIM_CELLS")
+  
+  for (k in n:2)
+  {
+    step_k<-max_x/k
+    n.x<-length(seq(pattern.range$window$xrange[1], pattern.range$window$xrange[2], by=step_k))
+    
+    step_k<-max_y/k
+    n.y<-length(seq(pattern.range$window$yrange[1], pattern.range$window$yrange[2], by=step_k))
+    
+    #create quadrat count from range
+    quadrat.coords.range<-quadratcount(pattern.range, n.x, n.y)
+    
+    #create quadrat count from plots/occurences
+    quadrat.coords.plots<-quadratcount(pattern.plots, n.x, n.y)
+    
+    #all quadrats from quadrat.coords.plots which are = quadrat.coords.range
+    tess.coords.range<-as.tess(quadrat.coords.range)
+    tess.coords.plots<-as.tess(quadrat.coords.plots)
+    
+    #change direction of index! (t)
+    is_in<-which(t(quadrat.coords.range>0))
+    is_not_in<-which(t(quadrat.coords.range==0))
+    
+    tess.coords.range<-tess.coords.range[is_in]
+    
+    #change direction of index (t)
+    is_in<-which(t(quadrat.coords.plots>0))
+    is_not_in<-which(t(quadrat.coords.plots==0))
+    
+    tess.coords.plots<-tess.coords.plots[is_in]
+    
+    coord.x<-c(1:tess.coords.plots$n)
+    coord.y<-c(1:tess.coords.plots$n)
+    
+    for (j in 1:tess.coords.plots$n)
+    {	
+      # rectangular window
+      coord.x[j]<-mean(tess.coords.plots[j]$window$xrange)
+      coord.y[j]<-mean(tess.coords.plots[j]$window$yrange)
+      
+    }
+    
+    #counts per quadrat in vector
+    is_in<-which(quadrat.coords.range>0)
+    coords.quadrat.vector<-as.vector(quadrat.coords.plots[is_in]) 
+    
+    #replace all values > 0 by 1 
+    coords.quadrat.binary<-ifelse(coords.quadrat.vector>1, 1, coords.quadrat.vector)
+    
+    #numbers of occupied cells
+    n_cells_all<-length(coords.quadrat.binary)
+    
+    n_cells_plots<-sum(coords.quadrat.binary)
+    
+    #in percent
+    n_cells_plots_percent<-(100*n_cells_plots)/n_cells_all
+    
+    output.k$STEP[n+1-k]<-n+1-k
+    output.k$N_CELLS[n+1-k]<-n_cells_plots_percent
+    output.k$DIM_CELLS[n+1-k]<-step_k
+  }
+  
+  #output - return
+  
+  DISTRIB.TAB<-output.k
+  DISTRIB.PERC<-(100*sum(output.k$N_CELLS))/(length(n:2)*100)
+  DISTRIB_w.PERC<-(100*sum(output.k$N_CELLS*((length(n:2)+1)-output.k$STEP)))/(sum(output.k$STEP)*100)
+  
+  DISTRIB.PERC<-round(DISTRIB.PERC, 4)
+  DISTRIB_w.PERC<-round(DISTRIB_w.PERC, 4)
+  
+  result.DMC<-list(DISTRIB.TAB, DISTRIB.PERC, DISTRIB_w.PERC)
+  names(result.DMC)<-c("data", "dmc", "dmc.w")	
+  
+  return(result.DMC)
+  
+}
+
+##################################################################################################################################################
+# the following DMC.Demo visualizes how the DMC scaling approach works
+# output of this calculation is 
+#     (1) dmc = the final DMC value 
+#     (2) dmc.w = the final DMC value, where matches on finer resolution are higher weighted than matches on coarser resolution 
+
+
+DMC.Demo<-function(plots, range, n=20)
+{
+  
+  if(n<=2){n=3}
+  
+  #coordinates of all range
+  coords.range<-data.frame(cbind(X=range$X, Y=range$Y))
+  
+  #coordinates of all plots/occurences
+  coords.plots<-data.frame(cbind(X=plots$X, Y=plots$Y))
+  
+  #>plot
+  op<-par()
+  
+  par(mar=c(3.75, 3.5, 2, 1), mgp=c(2, 0.75, 0))
+  
+  plot(coords.range, cex=0.5, pch=15, col="black")
+  points(coords.plots, cex=0.4, pch=15, col="red")
+  title("Input data")
+  legend("bottomleft",  y.intersp=1.25, pch=15, col=c("red", "black"), c("Plots", "Distribution"), bty="n")
+  
+  #read.key()
+  
+  #<plot
+  
+  #mask from range
+  #rectangular window with quadrats, occupied by plots/occurences
+  win.range<-owin(c(min(coords.range$X), max(coords.range$X)), c(min(coords.range$Y), max(coords.range$Y)))
+  
+  #delete plots/occurences coordinates which are not inside this window
+  is_in<-inside.owin(x=coords.plots$X, y=coords.plots$Y, w=win.range)
+  coords.plots.point_in<-coords.plots[is_in,]
+  coords.plots.point_out<-coords.plots[!is_in,]
+  
+  #create spatial point pattern-object from range
+  #rectangular
+  pattern.range<-ppp(x=coords.range$X, y=coords.range$Y, window=win.range)
+  
+  #create spatial point pattern-object from plots/occurences
+  #rectangular
+  pattern.plots<-ppp(x=coords.plots.point_in$X, y=coords.plots.point_in$Y, window=win.range)
+  
+  #quadrats (stepwise)
+  max_x<-diff(pattern.range$window$xrange)
+  max_y<-diff(pattern.range$window$yrange)
+  
+  #max. extent
+  max_xy<-ifelse(max_x>=max_y, max_x, max_y)
+  
+  output.k<-data.frame(matrix(0, (n-1), 3))
+  colnames(output.k)<-c("STEP", "N_CELLS", "DIM_CELLS")
+  
+  for (k in n:2)
+  {
+    step_k<-max_x/k
+    n.x<-length(seq(pattern.range$window$xrange[1], pattern.range$window$xrange[2], by=step_k))
+    
+    step_k<-max_y/k
+    n.y<-length(seq(pattern.range$window$yrange[1], pattern.range$window$yrange[2], by=step_k))
+    
+    #create quadrat count from range
+    quadrat.coords.range<-quadratcount(pattern.range, n.x, n.y)
+    
+    #create quadrat count from plots/occurences
+    quadrat.coords.plots<-quadratcount(pattern.plots, n.x, n.y)
+    
+    #all quadrats from quadrat.coords.plots which are = quadrat.coords.range
+    tess.coords.range<-as.tess(quadrat.coords.range)
+    tess.coords.plots<-as.tess(quadrat.coords.plots)
+    
+    tess.coords.all<-tess.coords.range
+    
+    #change direction of index! (t)
+    is_in<-which(t(quadrat.coords.range>0))
+    is_not_in<-which(t(quadrat.coords.range==0))
+    
+    tess.coords.range<-tess.coords.range[is_in]
+    
+    #change direction of index! (t)
+    is_in<-which(t(quadrat.coords.plots>0))
+    is_not_in<-which(t(quadrat.coords.plots==0))
+    
+    tess.coords.plots<-tess.coords.plots[is_in]
+    
+    #>plot
+    
+    plot(coords.range, cex=0.5, pch=15, col="white", main=paste("Step: ", n-k+1, sep=""))
+    plot(quadrat.coords.range, col="white",add=T)
+    plot.tess(tess.coords.range, color[1])
+    plot.tess(tess.coords.plots, color[2])
+    legend("bottomleft",  y.intersp=1.25, pch=15, col=color[2:1], c("Plots", "Distribution"), bty="o", bg=color[4])
+    
+    read.key()
+    
+    #<plot     
+    
+    coord.x<-c(1:tess.coords.plots$n)
+    coord.y<-c(1:tess.coords.plots$n)
+    
+    for (j in 1:tess.coords.plots$n)
+    {	
+      # rectangular window
+      coord.x[j]<-mean(tess.coords.plots[j]$window$xrange)
+      coord.y[j]<-mean(tess.coords.plots[j]$window$yrange)
+      
+    }
+    
+    #counts per quadrat in vector
+    is_in<-which(quadrat.coords.range>0)
+    coords.quadrat.vector<-as.vector(quadrat.coords.plots[is_in]) 
+    
+    #replace all values > 0 by 1 
+    coords.quadrat.binary<-ifelse(coords.quadrat.vector>1, 1, coords.quadrat.vector)
+    
+    #number of occupied cells
+    n_cells_all<-length(coords.quadrat.binary)
+    
+    n_cells_plots<-sum(coords.quadrat.binary)
+    
+    #in percent
+    n_cells_plots_percent<-(100*n_cells_plots)/n_cells_all
+    
+    output.k$STEP[n+1-k]<-n+1-k
+    output.k$N_CELLS[n+1-k]<-n_cells_plots_percent
+    output.k$DIM_CELLS[n+1-k]<-step_k
+  }
+  
+  #output - return
+  
+  DISTRIB.TAB<-output.k
+  DISTRIB.PERC<-(100*sum(output.k$N_CELLS))/(length(n:2)*100)
+  DISTRIB_w.PERC<-(100*sum(output.k$N_CELLS*((length(n:2)+1)-output.k$STEP)))/(sum(output.k$STEP)*100)
+  
+  DISTRIB.PERC<-round(DISTRIB.PERC, 4)
+  DISTRIB_w.PERC<-round(DISTRIB_w.PERC, 4)
+  
+  #>plot
+  
+  plot(x=output.k$STEP-1, y=output.k$N_CELLS, xlim=c(0,n), ylim=c(0,100), type="p", lwd=1.5, col=color[2], xlab="Increasing cell size [steps]", ylab="Matched cells [%]", main=paste("DMC:", DISTRIB.PERC, "%", "DMCw:", DISTRIB_w.PERC, "%", sep=" "))
+  steps<-c(0:(nrow(output.k)-1))
+  lines(steps, smooth.line(steps, output.k$N_CELLS), lwd=1, col="black")
+  
+  par(op)
+  
+  #<plot
+  
+  result.DMC<-list(DISTRIB.TAB, DISTRIB.PERC, DISTRIB_w.PERC)
+  names(result.DMC)<-c("data", "dmc", "dmc.w")	
+  
+  return(result.DMC)
+  
+}
+
+##################################################################################################################################################
+
+plot.tess<-function(tess, f.color, b.color=NULL)
+{
+  
+  df<-as.data.frame(tess)[,1:2]
+  
+  index.1<-seq(1, nrow(df), 4)
+  index.2<-seq(2, nrow(df), 4)
+  index.3<-seq(3, nrow(df), 4)
+  index.4<-seq(4, nrow(df), 4)
+  
+  for(k in 1:length(index.1))
+  {
+    p<-rbind(df[index.1[k],], df[index.2[k],], df[index.3[k],], df[index.4[k],])
+    
+    polygon(p, col=f.color, b.color)
+  }
+  
+}
+
+##################################################################################################################################################
+
+smooth.line<-function(x, y)
+{
+  #x<-c(1:length(y))
+  lo<-loess(y~x)
+  xl<-seq(min(x), max(x), (max(x) - min(x))/(length(y)-1))
+  
+  return(predict(lo, xl))
+}
+
+##################################################################################################################################################
+# get visualization of the single steps  and the final DMC value
+
+result.DMC<-DMC.Demo(eva, range, 20) # check number of scaling steps! must be identical with n in line 57
+print(result.DMC)
